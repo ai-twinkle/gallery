@@ -389,8 +389,8 @@ st.sidebar.image("static/ocf.svg")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("專案與程式碼")
-st.sidebar.markdown("🤗 [Formosa-Vision](#)")
-st.sidebar.markdown("💖 [GitHub 專案頁](#)")
+st.sidebar.markdown("🤗 [Formosa-Vision](https://huggingface.co/datasets/lianghsun/Formosa-Vision)")
+st.sidebar.markdown("💖 [GitHub 專案頁](https://github.com/lianghsun/twinkle-gallery)")
 
 # ------------------------
 # Main（你的版型；移除索引）
