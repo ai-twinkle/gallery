@@ -3,6 +3,8 @@
 images/
 static/moda_dark.svg
 static/moda_light.svg
+static/iii_dark.svg
+static/iii_light.svg
 static/ocf.svg
 data.jsonl
 data.jsonl.lock
