@@ -192,6 +192,49 @@ def verify_password(user_record: Dict[str, Any], password: str) -> bool:
 # QA 產生：Q（看圖）/ A（只看 text）
 # ------------------------
 def gen_question_from_image(img_path: str, fallback_text: str, temperature: float) -> Optional[str]:
+    # 問題生成的模式與隨機種子（供 UI 顯示）
+    mode = "visual"  # 或 "intro"
+    q_seed = random.randint(1, 10_000)
+    # 50% 機率：改為用 API 產生「導向介紹圖片」的單句問句（更有變化性）
+    # 另一半則維持原本「看圖提出可回答的具體問題」
+    if random.random() < 0.5:
+        mode = "intro"
+        client_alt = _get_client()
+        if client_alt:
+            try:
+                # 盲問：不傳圖片、不傳文本線索，避免模型提前帶入背景知識
+                sys_alt = (
+                    "你是一位提示語句產生器，目標是產生一個能引導對方『介紹這張圖片或談談由來/故事』的單句問句。"
+                    "限制：使用繁體中文、自然口語、不可包含引號或前後綴字樣、不要超過30字。"
+                    "重點：問題必須通用、開放式，不能包含任何具體地名、數字、人名或推測，不得引用圖片或文字中的內容。"
+                )
+                user_alt = (
+                    "請只輸出一句自然的繁中問句，引導對方介紹或說說這張圖的背景故事。"
+                    "務必避免加入任何特定名詞或細節，讓問句具有普適性。"
+                )
+                alt_messages = [
+                    {"role": "system", "content": sys_alt},
+                    {"role": "user", "content": user_alt},
+                ]
+                alt_resp = client_alt.chat.completions.create(
+                    model=MODEL,
+                    messages=alt_messages,
+                    temperature=temperature,
+                    seed=q_seed,
+                )
+                alt_q = (alt_resp.choices[0].message.content or "").strip()
+                alt_q = re.sub(r"\s+", " ", alt_q)
+                if alt_q:
+                    # 將元資料存到 session，供 UI 顯示
+                    st.session_state.qa_meta = {
+                        "mode": mode, "temperature": temperature, "q_seed": q_seed
+                    }
+                    return alt_q
+            except Exception:
+                pass
+        # API 失敗備援（仍屬於 intro 模式）
+        st.session_state.qa_meta = {"mode": mode, "temperature": temperature, "q_seed": q_seed}
+        return "可以簡單介紹一下這張圖片嗎？"
     client = _get_client()
     if client and SUPPORTS_VISION:
         try:
@@ -208,9 +251,11 @@ def gen_question_from_image(img_path: str, fallback_text: str, temperature: floa
                     model=MODEL,
                     messages=messages,
                     temperature=temperature,
+                    seed=q_seed,
                 )
                 q = (resp.choices[0].message.content or "").strip()
                 if q:
+                    st.session_state.qa_meta = {"mode": mode, "temperature": temperature, "q_seed": q_seed}
                     return q
         except Exception:
             pass
@@ -277,11 +322,21 @@ def gen_answer_from_text(
             {"role": "user", "content": user_text},
         ]
 
+    a_seed = random.randint(1, 10_000)
+    # 將 a_seed 也寫到 session 的 qa_meta（若已存在就更新）
+    try:
+        meta = dict(st.session_state.get("qa_meta", {}))
+        meta["a_seed"] = a_seed
+        st.session_state.qa_meta = meta
+    except Exception:
+        st.session_state.qa_meta = {"a_seed": a_seed, "temperature": temperature}
+
     try:
         resp = client.chat.completions.create(
             model=MODEL,
             messages=messages,
             temperature=temperature,
+            seed=a_seed,
         )
         out = (resp.choices[0].message.content or "").strip()
         return sanitize_model_output(out)
@@ -432,6 +487,10 @@ left_col, right_col = st.columns(2)
 with left_col:
     if img_path and os.path.exists(img_path):
         st.image(img_path, width='stretch')
+        # 圖片 caption：使用 JSONL 的 source（原圖網址）
+        src_caption = item.get("source") or ""
+        if src_caption:
+            st.caption(src_caption)
     else:
         st.warning("找不到圖片檔案。")
 
@@ -453,6 +512,19 @@ with left_col:
             st.session_state.qa_draft = None
             st.rerun()
 
+    # 回報圖文不合：將此筆 contributor 標記為目前登入者
+    if st.session_state.auth_user:
+        if st.button("🚩 回報圖文不合（將此筆 contributor 設為我）", width='stretch'):
+            item["contributor"] = st.session_state.auth_user["username"]
+            st.session_state.data_items[st.session_state.idx] = item
+            try:
+                write_jsonl(DATA_JSONL, st.session_state.data_items)
+                st.success("已回報並標記貢獻者為你。")
+            except Exception as e:
+                st.error(f"回報失敗：{e}")
+    else:
+        st.button("🚩 回報圖文不合（需登入）", width='stretch', disabled=True)
+
 # ---- 右側：新增單筆對話（在上方） → 既有對話 ----
 with right_col:
     need_login = st.session_state.auth_user is None
@@ -471,7 +543,7 @@ with right_col:
         if not API_KEY or not API_BASE:
             st.error("尚未設定 API（請在 .streamlit/secrets.toml 放入 MY_API_BASE / OPENAI_API_KEY）。")
         else:
-            with st.spinner(f"VLM 正在看圖提出問題…（temperature={st.session_state.temperature}）"):
+            with st.spinner("VLM 正在看圖提出問題…"):
                 q = gen_question_from_image(img_path, fallback_text=text, temperature=st.session_state.temperature)
             if not q:
                 st.error("產生問題失敗。")
@@ -487,7 +559,14 @@ with right_col:
                 st.rerun()
 
     if st.session_state.qa_draft:
-        st.info("草稿已產生，可編輯後存檔或取消。")
+        meta = st.session_state.get("qa_meta", {})
+        mode_label = "導向介紹（盲問）" if meta.get("mode") == "intro" else "看圖提問"
+        temp_val = meta.get("temperature", st.session_state.temperature)
+        q_seed = meta.get("q_seed", "-")
+        a_seed = meta.get("a_seed", "-")
+        # st.info(f"草稿已產生，可編輯後存檔或取消。｜模式：{mode_label}｜temp：{temp_val}｜q_seed：{q_seed}｜a_seed：{a_seed}")
+        st.info(f"草稿已產生，可編輯後存檔或取消。｜模式：{mode_label}")
+        
         st.text_input("問題（可改）", value=st.session_state.qa_draft["q"], key="draft_q")
         st.text_area("答案（可改）", value=st.session_state.qa_draft["a"], key="draft_a", height=180)
 
